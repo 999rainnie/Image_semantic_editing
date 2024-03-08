@@ -13,10 +13,12 @@ from diffusers import StableDiffusionAttendAndExcitePipeline
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.utils import logging
 from diffusers.loaders import TextualInversionLoaderMixin
-from utils.ptp_utils import Hook, CustomAttnProcessor, get_features
-from utils.attention_utils import AttentionStore
+from utils.ptp_utils import Hook, CustomAttnProcessor, get_features, AttentionStore
+from utils.guidance_functions import get_mask, get_attns
 from copy import deepcopy
 import copy
+
+from torchvision.utils import save_image
 
 
 logger = logging.get_logger(__name__)
@@ -555,7 +557,6 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
-        # ori_latents = latents
         latents = self.prepare_latents(
                 batch_size * num_images_per_prompt,
                 num_channels_latents,
@@ -566,7 +567,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 generator,
                 latents,
             )
-        ori_latents = latents.clone().detach()
+        # ori_latents = latents.clone().detach()
         
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -589,6 +590,8 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
             raise ValueError('Provide a list of object strings from the prompt.')
         if g_name not in ['edit_layout', 'edit_appearance', 'edit_layout_by_feature'] and obj_to_edit is None:
             raise ValueError('Provide an object string for editing.')
+        
+        # indices examples: "a photo of a cat" -> indices: ([5], [1, 2, 3, 4])
         if objects is None:
             indices = self.all_word_indexes(prompt, objects=objects, object_to_edit=obj_to_edit)
         else:
@@ -596,11 +599,6 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
         
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):  
-                ori_noise_pred, ori_feats = self.sample(ori_latents, self.scheduler, t, feature_layer, guidance_scale, ori_cond_prompt_embeds, ori_prompt_embeds, cross_attention_kwargs, hook, pred_type='ori', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
-                ori_latents = self.scheduler.step(
-                            ori_noise_pred, t, ori_latents, **extra_step_kwargs
-                ).prev_sample
-                
                 # Bookkeeping
                 index = len(self.scheduler.timesteps) - 1 - i
                 
@@ -612,9 +610,33 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 variance = self.scheduler._get_variance(t, prev_t)
                 std_dev_t = eta * variance ** (0.5) 
                 
+                ori_latents = all_latents[index].clone().detach()
+                ori_noise_pred, ori_feats = self.sample(ori_latents, self.scheduler, t, feature_layer, guidance_scale, ori_cond_prompt_embeds, ori_prompt_embeds, cross_attention_kwargs, hook, pred_type='ori', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
+                ori_latents = self.scheduler.step(
+                            ori_noise_pred, t, ori_latents, **extra_step_kwargs
+                ).prev_sample
+                
                 if is_guidance:
                     with torch.enable_grad():
                         for guidance_iter in range(max_guidance_iter_per_step):
+                            if guidance_iter != 0 or i != 0:
+                                origs_attn, edits_attn = get_attns(self.attention_store)
+                                edit_mask = get_mask(edits_attn, indices[0])
+                                threshold = edit_mask.max() * 0.2
+                                edit_mask = (edit_mask > threshold).float()
+                                save_image(edit_mask*255, "edit_mask_image.png")
+                            
+                            # # replace latents
+                            # if i > 10: #guidance_iter != 0 or i != 0:
+                            #     origs_attn, edits_attn = get_attns(self.attention_store)
+                            #     orig_mask = get_mask(origs_attn, indices[0])
+                            #     edit_mask = get_mask(edits_attn, indices[0])
+
+                            #     mask = torch.logical_or((orig_mask>0.01), (edit_mask>0.01))
+                            #     mask = mask.float()
+                            #     save_image(mask*255, 'mask_image.png')
+                            #     latents = latents * mask + all_latents[index] * (1 - mask)
+                            
                             latents_grad = latents.clone().detach().to(prompt_embeds.dtype).requires_grad_(True)
                             edit_noise_pred, edit_feats = self.sample(latents_grad, edit_scheduler, t, feature_layer, guidance_scale, cond_prompt_embeds, prompt_embeds, cross_attention_kwargs, hook, pred_type='edit', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
                             

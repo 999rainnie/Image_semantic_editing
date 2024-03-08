@@ -10,6 +10,7 @@ from sklearn.decomposition import PCA
 import torchvision.transforms as T
 from PIL import Image
 import os
+from torchvision.utils import save_image
 
 # the calculation of character or attribute
 def threshold_attention(attn, s=10):
@@ -58,8 +59,21 @@ def get_attns(attn_storage):
         edits = attn_storage.maps('edit')
     return origs, edits
 
-
-
+def get_mask(attn, index):
+    # orig_attns = attn_storage.maps('ori')
+    # edit_attns = attn_storage.maps('edit')
+    # shapes = []
+    
+    attn = torch.stack([a.chunk(2)[1][:,:,index] for a in attn['up'][-3:]]).mean(0)
+    if not len(attn.shape) == 3: attn = attn[:,:,None]
+    H = W = int(tensor(attn.shape[-2]).sqrt().item())
+    
+    mask = get_shape(attn).sum(0).view(H, W, attn.shape[-1])
+            
+    # mask = torch.logical_or((orig_mask==1), (edit_mask==1)) ##IS RIGTH?
+    # shapes.append(mask.float())
+    
+    return mask.squeeze(-1)
 
 # get character or attribute from attention layer or resnet layers
 def fix_shapes_l1(orig_attns, edit_attns, indices, tau=1):
@@ -140,6 +154,31 @@ def position_deltas(orig_attns, edit_attns, indices, target_centroid=None):
                 positions.append(target.to(orig.device) - get_centroid(edit))
     return torch.stack(positions).mean()
 
+
+def match_semantic(orig_attns, ori_feats, edit_attns, edit_feats, indices):
+    ori_feats = get_mask(orig_attns, indices) * ori_feats 
+    edit_feats = get_mask(edit_attns, indices) * edit_feats
+    
+    ori_feats_2d = ori_feats.reshape(ori_feats.shape[1], -1).permute(1, 0)
+    edit_feats_2d = edit_feats.reshape(edit_feats.shape[1], -1).permute(1, 0)
+
+    distance = torch.cdist(ori_feats_2d, edit_feats_2d)
+    nearest_indices = torch.argmin(distance, dim=1)
+    
+    flow_map = torch.stack([nearest_indices % (ori_feats.shape[3]), nearest_indices // (ori_feats.shape[3])], dim=0).float()
+    flow_map = flow_map.reshape(2, ori_feats.shape[2], ori_feats.shape[3])
+    flow_map[0] = flow_map[0] / (ori_feats.shape[3] - 1) * 2 - 1
+    flow_map[1] = flow_map[1] / (ori_feats.shape[2] - 1) * 2 - 1
+    
+    flow_map = flow_map.permute(1, 2, 0)
+    
+    diff_y = flow_map[1:] - flow_map[:-1]
+    diff_x = flow_map[:, 1:] - flow_map[:, :-1]
+    tv_loss = torch.sum(torch.abs(diff_x)) + torch.sum(torch.abs(diff_y))
+
+    return tv_loss
+
+    
 def roll_shape(x, direction='up', factor=0.5):
     h = w = int(math.sqrt(x.shape[-2]))
     mag = (0,0)
@@ -180,8 +219,6 @@ def resize(x, scale_factor=1):
     if scale_factor > 1: return enlarge(x)
     elif scale_factor < 1: return shrink(x)
     else: return x
-
-
 
 
 # guidance functions
@@ -229,16 +266,11 @@ def move_object_by_centroid(attn_storage, indices, target_centroid=None, shape_w
 
 def move_object_by_shape(attn_storage, indices, tau=fc.noop, shape_weight=1, appearance_weight=0.5, position_weight=1, ori_feats=None, edit_feats=None, **kwargs):
     origs, edits = get_attns(attn_storage)
-    # orig_selfs = [v['orig'] for k,v in attn_storage.storage.items() if 'attn1' in k and v['orig'].shape[-1] == 4096]
-    # edit_selfs = [v['edit'] for k,v in attn_storage.storage.items() if 'attn1' in k and v['orig'].shape[-1] == 4096]
     if len(indices) > 1: 
         obj_idx, other_idx = indices
         indices = torch.cat([obj_idx, other_idx])
     shape_term = shape_weight * fix_shapes_l1(origs, edits, other_idx)
     appearance_term = appearance_weight * fix_appearances_by_feature(ori_feats, edit_feats, indices)
-    # size_term = size_weight*fix_sizes(origs, edits, obj_idx)
-    # position_term = position_weight*position_deltas_2(origs, edits, obj_idx, target_centroid=target_centroid)
-    # self_term = self_weight*fix_selfs_2(orig_selfs, edit_selfs, t=t)
     move_term = position_weight * fix_shapes_l2(origs, edits, obj_idx, tau=tau)
     return move_term + shape_term + appearance_term
 
@@ -249,3 +281,12 @@ def fix_appearances_by_feature(ori_feats, edit_feats, indices):
 
 def edit_layout_by_feature(attn_storage, indices, appearance_weight=0.5, ori_feats=None, edit_feats=None, **kwargs):
     return appearance_weight * fix_appearances_by_feature(ori_feats, edit_feats, indices)
+
+def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=0.5, ori_feats=None, edit_feats=None):
+    origs, edits = get_attns(attn_storage)
+    if len(indices) > 1: 
+        obj_idx, other_idx = indices
+    
+    semantic_term = sem_weight * match_semantic(origs, ori_feats, edits, edit_feats, obj_idx)
+    position_term = position_weight * position_deltas(origs, edits, obj_idx)
+    return position_term + semantic_term
