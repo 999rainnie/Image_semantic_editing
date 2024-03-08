@@ -99,3 +99,63 @@ def visualize_and_save_features_pca(feature_maps_fit_data,feature_maps_transform
         pca_img = Image.fromarray((pca_img * 255).astype(np.uint8))
         pca_img = T.Resize(512, interpolation=T.InterpolationMode.NEAREST)(pca_img)
         pca_img.save(os.path.join(f"{experiment}_time_{t}.png"))
+        
+
+def aggregate_attention(prompts, attention_store, res, from_where, is_cross, select):
+    out = []
+    attention_maps = attention_store.get_average_attention()
+    num_pixels = res ** 2
+    for location in from_where:
+        for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
+            if item.dim() == 3:
+                if item.shape[1] == num_pixels:
+                    cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
+                    out.append(cross_maps)
+            elif item.dim() == 4:
+                t, h, res_sq, token = item.shape
+                if item.shape[2] == num_pixels:
+                    cross_maps = item.reshape(len(prompts), t, -1, res, res, item.shape[-1])[select]
+                    out.append(cross_maps)
+                    
+    out = torch.cat(out, dim=-4)
+    out = out.sum(-4) / out.shape[-4]
+    return out.cpu()
+
+
+def show_cross_attention(tokenizer, prompts, attention_store, res, from_where, select= 0, save_path = None):
+    """
+        attention_store (AttentionStore): 
+            ["down", "mid", "up"] X ["self", "cross"]
+            4,         1,    6
+            head*res*text_token_len = 8*res*77
+            res=1024 -> 64 -> 1024
+        res (int): res
+        from_where (List[str]): "up", "down'
+    """
+    if isinstance(prompts, str):
+        prompts = [prompts,]
+    tokens = tokenizer.encode(prompts[select]) 
+    decoder = tokenizer.decode
+    
+    attention_maps = aggregate_attention(prompts, attention_store, res, from_where, True, select)
+    os.makedirs('trash', exist_ok=True)
+    attention_list = []
+    if attention_maps.dim()==3: attention_maps=attention_maps[None, ...]
+    for j in range(attention_maps.shape[0]):
+        images = []
+        for i in range(len(tokens)):
+            image = attention_maps[j, :, :, i]
+            image = 255 * image / image.max()
+            image = image.unsqueeze(-1).expand(*image.shape, 3)
+            image = image.numpy().astype(np.uint8)
+            image = np.array(Image.fromarray(image).resize((256, 256)))
+            image = ptp_utils.text_under_image(image, decoder(int(tokens[i])))
+            images.append(image)
+        ptp_utils.view_images(np.stack(images, axis=0), save_path=save_path)
+        atten_j = np.concatenate(images, axis=1)
+        attention_list.append(atten_j)
+    if save_path is not None:
+        now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        video_save_path = f'{save_path}/{now}.gif'
+        save_gif_mp4_folder_type(attention_list, video_save_path)
+    return attention_list

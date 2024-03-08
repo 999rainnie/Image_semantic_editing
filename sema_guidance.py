@@ -4,6 +4,7 @@ import torch, gc
 from functools import partial
 import argparse
 from torch import tensor
+import torch.nn.functional as F
 from diffusers import LMSDiscreteScheduler, UNet2DConditionModel, AutoencoderKL, DDPMScheduler, DDIMScheduler, DPMSolverMultistepScheduler, StableDiffusionPipeline
 from transformers import AutoTokenizer, CLIPTextModel, CLIPImageProcessor
 from diffusers.pipelines.stable_diffusion import (
@@ -619,12 +620,17 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 if is_guidance:
                     with torch.enable_grad():
                         for guidance_iter in range(max_guidance_iter_per_step):
-                            if guidance_iter != 0 or i != 0:
-                                origs_attn, edits_attn = get_attns(self.attention_store)
-                                edit_mask = get_mask(edits_attn, indices[0])
-                                threshold = edit_mask.max() * 0.2
-                                edit_mask = (edit_mask > threshold).float()
-                                save_image(edit_mask*255, "edit_mask_image.png")
+                            if i > 10 and guidance_iter > 13: #guidance_iter != 0 or i != 0:
+                                orig_mask = self.attention_store.show_attention('ori', indices[0])[None, None]
+                                edit_mask = self.attention_store.show_attention('edit', indices[0])[None, None]
+                                save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
+                                save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
+
+                                mask = (orig_mask + edit_mask) > 0.5
+                                save_image(mask.float(), 'mask_image.png')
+                                mask = mask.float() 
+                                mask = F.interpolate(mask, (64,64), mode='bilinear', align_corners=True)
+                                latents = latents * mask + all_latents[index] * (1 - mask)
                             
                             # # replace latents
                             # if i > 10: #guidance_iter != 0 or i != 0:

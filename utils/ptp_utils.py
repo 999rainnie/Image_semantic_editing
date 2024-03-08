@@ -57,18 +57,32 @@ class AttentionStore:
         if self.cur_att_layer == self.num_att_layers:
             self.cur_att_layer = 0
             self.between_steps(pred_type)
-    
-    def aggregate_attention(self, from_where: List[str]) -> torch.Tensor:
+
+    # def get_average_attention(self):
+    #     "divide the attention map value in attention store by denoising steps"
+    #     average_attention = {key: [item / self.cur_step for item in self.attention_store[key]] for key in self.attention_store}
+    #     return average_attention
+      
+    def aggregate_attention(self, res, pred_type, from_where: List[str]) -> torch.Tensor:
         """Aggregates the attention across the different layers and heads at the specified resolution."""
         out = []
-        attention_maps = self.get_average_attention()
+        # attention_maps = self.get_average_attention()
+        attention_maps = self.attention_store[pred_type]
+        num_pixels = res ** 2
         for location in from_where:
             for item in attention_maps[location]:
-                cross_maps = item.reshape(-1, self.attn_res[0], self.attn_res[1], item.shape[-1])
-                out.append(cross_maps)
+                if item.shape[1] == num_pixels:
+                    cross_maps = item.reshape(-1, res, res, item.shape[-1])
+                    out.append(cross_maps)
         out = torch.cat(out, dim=0)
         out = out.sum(0) / out.shape[0]
         return out
+    
+    def show_attention(self, pred_type, index, res=16, from_where=['up', 'down']):
+        attention = self.aggregate_attention(res, pred_type, from_where)
+        mask = attention[:,:,index]
+        mask = mask / mask.max()
+        return mask.squeeze(-1)
 
     def reset(self):
         self.cur_att_layer = 0
