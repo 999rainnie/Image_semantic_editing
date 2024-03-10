@@ -142,6 +142,23 @@ def fix_sizes(orig_attns, edit_attns, indices, tau=1):
                 sizes.append(tau*get_size(orig) - get_size(edit))
     return torch.stack(sizes).mean()
 
+"""
+# def position_deltas(orig_attns, edit_attns, indices, target_centroid=None, res=16):
+#     positions = []
+#     num_pixels = res ** 2
+    
+#     for location in ["mid", "up", "down"]:
+#         for o in indices:
+#             for edit_attn_map_integrated, ori_attn_map_integrated in zip(edit_attns[location], orig_attns[location]):
+#                 if edit_attn_map_integrated.shape[1] == num_pixels:
+#                     edit_attn_map = edit_attn_map_integrated.chunk(2)[1]
+#                     ori_attn_map = ori_attn_map_integrated.chunk(2)[1]
+#                     orig, edit = ori_attn_map[:,:,o], edit_attn_map[:,:,o]
+#                     target = tensor(target_centroid) if target_centroid is not None else get_centroid(orig)
+#                     positions.append(torch.abs(target.to(orig.device) - get_centroid(edit)))
+#     return torch.stack(positions).mean() * 0.001
+""" 
+
 def position_deltas(orig_attns, edit_attns, indices, target_centroid=None):
     positions = []
     for location in ["mid", "up", "down"]:
@@ -151,13 +168,20 @@ def position_deltas(orig_attns, edit_attns, indices, target_centroid=None):
                 ori_attn_map = ori_attn_map_integrated.chunk(2)[1]
                 orig, edit = ori_attn_map[:,:,o], edit_attn_map[:,:,o]
                 target = tensor(target_centroid) if target_centroid is not None else get_centroid(orig)
-                positions.append(target.to(orig.device) - get_centroid(edit))
-    return torch.stack(positions).mean()
+                positions.append(torch.abs(target.to(orig.device) - get_centroid(edit)))
+    return torch.stack(positions).mean() * 0.001
 
+def match_semantic(attention_store, ori_feats, edit_feats, indices):
+    orig_mask = attention_store.show_attention('ori', indices[0])[None, None]
+    edit_mask = attention_store.show_attention('edit', indices[0])[None, None]
 
-def match_semantic(orig_attns, ori_feats, edit_attns, edit_feats, indices):
-    ori_feats = get_mask(orig_attns, indices) * ori_feats 
-    edit_feats = get_mask(edit_attns, indices) * edit_feats
+    orig_mask = F.interpolate((orig_mask > 0.5).float(), (64,64), mode='bilinear', align_corners=True)
+    edit_mask = F.interpolate((edit_mask > 0.5).float(), (64,64), mode='bilinear', align_corners=True)
+
+    print(orig_mask.shape, ori_feats.shape, edit_mask.shape, edit_feats.shape)
+    
+    ori_feats = orig_mask * ori_feats 
+    edit_feats = edit_mask * edit_feats
     
     ori_feats_2d = ori_feats.reshape(ori_feats.shape[1], -1).permute(1, 0)
     edit_feats_2d = edit_feats.reshape(edit_feats.shape[1], -1).permute(1, 0)
@@ -287,6 +311,8 @@ def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=
     if len(indices) > 1: 
         obj_idx, other_idx = indices
     
-    semantic_term = sem_weight * match_semantic(origs, ori_feats, edits, edit_feats, obj_idx)
-    position_term = position_weight * position_deltas(origs, edits, obj_idx)
-    return position_term + semantic_term
+    # semantic_term = sem_weight * match_semantic(attn_storage, ori_feats, edit_feats, obj_idx)
+    
+    position_term = position_weight * fix_shapes_l2(origs, edits, obj_idx)
+    # position_term = position_weight * position_deltas(origs, edits, obj_idx)
+    return position_term #+ semantic_term

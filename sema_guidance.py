@@ -618,30 +618,20 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 ).prev_sample
                 
                 if is_guidance:
+                # if i > 5:
                     with torch.enable_grad():
                         for guidance_iter in range(max_guidance_iter_per_step):
-                            if i > 10 and guidance_iter > 13: #guidance_iter != 0 or i != 0:
+                            if i > 5 and guidance_iter > 13: #guidance_iter != 0 or i != 0:
                                 orig_mask = self.attention_store.show_attention('ori', indices[0])[None, None]
                                 edit_mask = self.attention_store.show_attention('edit', indices[0])[None, None]
-                                save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
-                                save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
+                                # save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
+                                # save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
 
-                                mask = (orig_mask + edit_mask) > 0.5
+                                mask = (orig_mask + edit_mask) > 0.4 #0.25  
                                 save_image(mask.float(), 'mask_image.png')
                                 mask = mask.float() 
                                 mask = F.interpolate(mask, (64,64), mode='bilinear', align_corners=True)
                                 latents = latents * mask + all_latents[index] * (1 - mask)
-                            
-                            # # replace latents
-                            # if i > 10: #guidance_iter != 0 or i != 0:
-                            #     origs_attn, edits_attn = get_attns(self.attention_store)
-                            #     orig_mask = get_mask(origs_attn, indices[0])
-                            #     edit_mask = get_mask(edits_attn, indices[0])
-
-                            #     mask = torch.logical_or((orig_mask>0.01), (edit_mask>0.01))
-                            #     mask = mask.float()
-                            #     save_image(mask*255, 'mask_image.png')
-                            #     latents = latents * mask + all_latents[index] * (1 - mask)
                             
                             latents_grad = latents.clone().detach().to(prompt_embeds.dtype).requires_grad_(True)
                             edit_noise_pred, edit_feats = self.sample(latents_grad, edit_scheduler, t, feature_layer, guidance_scale, cond_prompt_embeds, prompt_embeds, cross_attention_kwargs, hook, pred_type='edit', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
