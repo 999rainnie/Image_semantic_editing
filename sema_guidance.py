@@ -637,7 +637,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                             edit_noise_pred, edit_feats = self.sample(latents_grad, edit_scheduler, t, feature_layer, guidance_scale, cond_prompt_embeds, prompt_embeds, cross_attention_kwargs, hook, pred_type='edit', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
                             
                             if self.do_self_guidance(i, len(self.scheduler.timesteps), self.scheduler):
-                                loss = guidance_func(self.attention_store, indices, ori_feats=ori_feats, edit_feats=edit_feats)
+                                loss = guidance_func(self.attention_store, indices, ori_feats=ori_feats, edit_feats=edit_feats, iters=i)
                                 grad_cond = torch.autograd.grad(
                                     loss.requires_grad_(True),
                                     [latents_grad],
