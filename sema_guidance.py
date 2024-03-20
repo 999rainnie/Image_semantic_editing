@@ -342,7 +342,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
             else: return False
         if type(scheduler).__name__ == "DDIMScheduler":
             if time <= int((3*T)/16): return True
-            elif time >= int(T - T/32): return False # 3 or 4
+            elif time >= int(T - T/32): return False 
             elif time % 2 == 0: return True
             else: return False
         elif type(scheduler).__name__ == "LMSDiscreteScheduler":
