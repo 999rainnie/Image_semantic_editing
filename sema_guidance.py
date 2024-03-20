@@ -342,7 +342,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
             else: return False
         if type(scheduler).__name__ == "DDIMScheduler":
             if time <= int((3*T)/16): return True
-            elif time >= int(T - T/32): return False
+            elif time >= int(T - T/32): return False # 3 or 4
             elif time % 2 == 0: return True
             else: return False
         elif type(scheduler).__name__ == "LMSDiscreteScheduler":
@@ -621,13 +621,13 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 # if i > 5:
                     with torch.enable_grad():
                         for guidance_iter in range(max_guidance_iter_per_step):
-                            if i > 5 and guidance_iter > 13: #guidance_iter != 0 or i != 0:
+                            if i > 5: # and guidance_iter > 13: #13 #guidance_iter != 0 or i != 0:
                                 orig_mask = self.attention_store.show_attention('ori', indices[0])[None, None]
                                 edit_mask = self.attention_store.show_attention('edit', indices[0])[None, None]
                                 # save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
                                 # save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
 
-                                mask = (orig_mask + edit_mask) > 0.4 #0.25  
+                                mask = (orig_mask + edit_mask) > 0.5 #0.25  
                                 save_image(mask.float(), 'mask_image.png')
                                 mask = mask.float() 
                                 mask = F.interpolate(mask, (64,64), mode='bilinear', align_corners=True)

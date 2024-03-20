@@ -182,20 +182,20 @@ def match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, indices, with_ma
     ori_feats_2d = ori_feats.reshape(ori_feats.shape[1], -1).permute(1, 0)
     edit_feats_2d = edit_feats.reshape(edit_feats.shape[1], -1).permute(1, 0)
 
-    distance = torch.cdist(ori_feats_2d, edit_feats_2d)
+    distance = torch.cdist(edit_feats_2d, ori_feats_2d)
     nearest_indices = torch.argmin(distance, dim=1)
     
     flow_map = torch.stack([nearest_indices % (ori_feats.shape[3]), nearest_indices // (ori_feats.shape[3])], dim=0).float()
-    flow_map = flow_map.reshape(2, ori_feats.shape[2], ori_feats.shape[3])
+    flow_map = flow_map.reshape(2, edit_feats.shape[2], edit_feats.shape[3])
     flow_map[0] = flow_map[0] / (ori_feats.shape[3] - 1) * 2 - 1
     flow_map[1] = flow_map[1] / (ori_feats.shape[2] - 1) * 2 - 1
     
     flow_map = flow_map.permute(1, 2, 0)
     
-    # # ver1 (*0.01)
-    # diff_y = flow_map[1:] - flow_map[:-1]
-    # diff_x = flow_map[:, 1:] - flow_map[:, :-1]
-    # tv_loss = torch.sum(torch.abs(diff_x)) + torch.sum(torch.abs(diff_y))
+    # ver1 (*0.01)
+    diff_y = flow_map[1:] - flow_map[:-1]
+    diff_x = flow_map[:, 1:] - flow_map[:, :-1]
+    tv_loss = torch.sum(torch.abs(diff_x)) + torch.sum(torch.abs(diff_y))
     
     # # ver2
     # diff_y = flow_map[:-1] - flow_map[1:]
@@ -209,18 +209,18 @@ def match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, indices, with_ma
     # total_diff_x += diff_x
     # tv_loss = torch.sum(total_diff_y) + torch.sum(total_diff_x)
     
-    # ver3 (*0.01)
-    diff_y = flow_map[:-1] - flow_map[1:]
-    diff_x = flow_map[:, :-1] - flow_map[:, 1:]
+    # # ver3 (*0.01)
+    # diff_y = flow_map[:-1] - flow_map[1:]
+    # diff_x = flow_map[:, :-1] - flow_map[:, 1:]
     
-    diff_y[diff_y < 0] = 0
-    diff_x[diff_x < 0] = 0
+    # diff_y[diff_y < 0] = 0
+    # diff_x[diff_x < 0] = 0
     
-    tv_loss = torch.sum(diff_y) + torch.sum(diff_x)    
+    # tv_loss = torch.sum(diff_y) + torch.sum(diff_x)    
     
     # visualize with PCA
     if iters is not None:
-        if visualize and iters > 40:
+        if visualize and iters > 45:
             n_components = 4
             pca = PCA(n_components=n_components)
             feat1_n_feat2 = torch.cat((ori_feats_2d, edit_feats_2d), dim=0)
@@ -247,7 +247,7 @@ def match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, indices, with_ma
             
             plt.tight_layout() 
             fig.savefig('./pca.png', dpi=300)
-    return tv_loss * 0.01, flow_map #0.01 (Ver 1)
+    return tv_loss * 0.01, flow_map 
 
 def fit_semantic_with_flow(flow_map, orig_mask, ori_feats, edit_mask, edit_feats, indices):
     appearances = []
@@ -382,21 +382,21 @@ def fix_semantic(orig_mask, ori_feats, edit_mask, edit_feats, indices):
         
     #     appearances.append((ori_sem - edit_sem).pow(2).mean())
     
-    ##VER2 (*0.01)
-    appearances = []
-    for o in indices:
-        ori_sem = (orig_mask * ori_feats).sum((2,3)) / orig_mask.sum()
-        edit_sem = (edit_mask * edit_feats).sum((2,3)) / edit_mask.sum()         
-        appearances.append((ori_sem - edit_sem).pow(2).mean())
-    
-    # ##VER3 (*0.1)
+    # ##VER2 (*0.01)
     # appearances = []
     # for o in indices:
-    #     # ori_feats = ori_feats * orig_mask 
-    #     # edit_feats = edit_feats * edit_mask 
-    #     appearances.append((ori_feats - edit_feats).pow(2).mean())
+    #     ori_sem = (orig_mask * ori_feats).sum((2,3)) / orig_mask.sum()
+    #     edit_sem = (edit_mask * edit_feats).sum((2,3)) / edit_mask.sum()         
+    #     appearances.append((ori_sem - edit_sem).pow(2).mean())
     
-    return torch.stack(appearances).mean() * 0.01 
+    ##VER3 (*0.1)
+    appearances = []
+    for o in indices:
+        # ori_feats = ori_feats * orig_mask 
+        # edit_feats = edit_feats * edit_mask 
+        appearances.append((ori_feats - edit_feats).pow(2).mean())
+    
+    return torch.stack(appearances).mean() * 0.1 
 
 def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=0.5, fit_weight=1.0, feature_weight=0.5, ori_feats=None, edit_feats=None, iters=None):
     origs, edits = get_attns(attn_storage)
@@ -413,13 +413,13 @@ def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=
     # position_term = position_weight * position_deltas(origs, edits, obj_idx)
     position_term = position_weight * fix_shapes_l2(origs, edits, obj_idx)
 
-    semantic_term, _ =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, iters=iters)
+    semantic_term, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, iters=iters)
     semantic_term = sem_weight * semantic_term 
-    semantic_term_wo_mask, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, with_mask=False, visualize=False)
-    semantic_term_wo_mask = sem_weight * semantic_term_wo_mask
+    # semantic_term_wo_mask, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, with_mask=False, visualize=False)
+    # semantic_term_wo_mask = sem_weight * semantic_term_wo_mask
     
-    fit_feat_term = fit_weight * fit_semantic_with_flow(flow_map, orig_mask, ori_feats, edit_mask, edit_feats, obj_idx)
+    # fit_feat_term = fit_weight * fit_semantic_with_flow(flow_map, orig_mask, ori_feats, edit_mask, edit_feats, obj_idx)
     feature_term = feature_weight * fix_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx)
-    print(position_term, semantic_term, semantic_term_wo_mask, fit_feat_term, feature_term)  
+    print(position_term, semantic_term, feature_term)  
       
-    return position_term + semantic_term + semantic_term_wo_mask + fit_feat_term + feature_term
+    return position_term + semantic_term + feature_term
