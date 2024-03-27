@@ -19,6 +19,7 @@ from utils.guidance_functions import get_mask, get_attns
 from copy import deepcopy
 import copy
 
+from PIL import Image
 from torchvision.utils import save_image
 
 
@@ -341,6 +342,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
             elif time % 2 == 0: return True
             else: return False
         if type(scheduler).__name__ == "DDIMScheduler":
+            # if time <= int((8*T)/10): return True
             if time <= int((3*T)/16): return True
             elif time >= int(T - T/32): return False 
             elif time % 2 == 0: return True
@@ -598,6 +600,7 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
         else:
             indices = self.choose_object_indexes(prompt, objects=objects, object_to_edit=obj_to_edit)
         
+        mask = None
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):  
                 # Bookkeeping
@@ -616,62 +619,62 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
                 ori_latents = self.scheduler.step(
                             ori_noise_pred, t, ori_latents, **extra_step_kwargs
                 ).prev_sample
-                
-                if is_guidance:
+                                
+                # if is_guidance:
                 # if i > 5:
-                    with torch.enable_grad():
-                        for guidance_iter in range(max_guidance_iter_per_step):
-                            if i > 5: # and guidance_iter > 13: #13 #guidance_iter != 0 or i != 0:
-                                orig_mask = self.attention_store.show_attention('ori', indices[0])[None, None]
-                                edit_mask = self.attention_store.show_attention('edit', indices[0])[None, None]
-                                # save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
-                                # save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
+                with torch.enable_grad():
+                    for guidance_iter in range(max_guidance_iter_per_step):
+                        if i > 5 and guidance_iter > 13: #13 #guidance_iter != 0 or i != 0:
+                            orig_mask = self.attention_store.show_attention('ori', indices[0])[None, None]
+                            edit_mask = self.attention_store.show_attention('edit', indices[0])[None, None]
+                            # save_image((orig_mask > 0.5).float(), 'orig_mask_image.png')
+                            # save_image((edit_mask > 0.5).float(), "edit_mask_image.png")
 
-                                mask = (orig_mask + edit_mask) > 0.5 #0.25  
-                                save_image(mask.float(), 'mask_image.png')
-                                mask = mask.float() 
-                                mask = F.interpolate(mask, (64,64), mode='bilinear', align_corners=True)
-                                latents = latents * mask + all_latents[index] * (1 - mask)
+                            mask = (orig_mask + edit_mask) > 0.5 #0.25  
+                            save_image(mask.float(), 'mask_image.png')
+                            mask = mask.float() 
+                            mask = F.interpolate(mask, (64,64), mode='bilinear', align_corners=True)
+                            latents = latents * mask + all_latents[index] * (1 - mask)
+                        
+                        latents_grad = latents.clone().detach().to(prompt_embeds.dtype).requires_grad_(True)
+                        edit_noise_pred, edit_feats = self.sample(latents_grad, edit_scheduler, t, feature_layer, guidance_scale, cond_prompt_embeds, prompt_embeds, cross_attention_kwargs, hook, pred_type='edit', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
+                        
+                        if self.do_self_guidance(i, len(self.scheduler.timesteps), self.scheduler):
+                            loss = guidance_func(self.attention_store, indices, ori_feats=ori_feats, edit_feats=edit_feats, iters=i)
+                            grad_cond = torch.autograd.grad(
+                                loss.requires_grad_(True),
+                                [latents_grad],
+                                retain_graph=True,
+                            )[0]
+                            if isinstance(self.scheduler, LMSDiscreteScheduler):
+                                sig_t = self.scheduler.sigmas[i]
+                            else:
+                                sig_t = 1 - self.scheduler.alphas_cumprod[t]
+                            edit_noise_pred += g_weight * sig_t * grad_cond
                             
-                            latents_grad = latents.clone().detach().to(prompt_embeds.dtype).requires_grad_(True)
-                            edit_noise_pred, edit_feats = self.sample(latents_grad, edit_scheduler, t, feature_layer, guidance_scale, cond_prompt_embeds, prompt_embeds, cross_attention_kwargs, hook, pred_type='edit', set_store=True, do_classifier_free_guidance=do_classifier_free_guidance)
+                        del latents_grad
+                        
+                        # DDIM step
+                        with torch.no_grad():
+                            # current prediction for x_0
+                            pred_x0 = (latents - beta_prod_t ** (0.5) * edit_noise_pred) / alpha_prod_t.sqrt()
+
+                            # direction pointing to x_t
+                            dir_xt = (1. - alpha_prod_t_prev - std_dev_t ** 2).sqrt() * edit_noise_pred
+
+                            # random noise
+                            noise = std_dev_t * torch.randn(latents.shape).to(device)
                             
-                            if self.do_self_guidance(i, len(self.scheduler.timesteps), self.scheduler):
-                                loss = guidance_func(self.attention_store, indices, ori_feats=ori_feats, edit_feats=edit_feats, iters=i)
-                                grad_cond = torch.autograd.grad(
-                                    loss.requires_grad_(True),
-                                    [latents_grad],
-                                    retain_graph=True,
-                                )[0]
-                                if isinstance(self.scheduler, LMSDiscreteScheduler):
-                                    sig_t = self.scheduler.sigmas[i]
-                                else:
-                                    sig_t = 1 - self.scheduler.alphas_cumprod[t]
-                                edit_noise_pred += g_weight * sig_t * grad_cond
-                                
-                            del latents_grad
+                            # DDIM step, get prev latent z_{t-1}
+                            latents_prev = alpha_prod_t_prev.sqrt() * pred_x0 + dir_xt + noise
+
+                            # Inject noise (sample forward process) for recursive denoising
+                            recur_noise = torch.randn(latents.shape).to(device)
+                            latents = (alpha_prod_t / alpha_prod_t_prev).sqrt() * latents_prev + (1 - (alpha_prod_t / alpha_prod_t_prev)).sqrt() * recur_noise
+
+                            del pred_x0, dir_xt, noise  
                             
-                            # DDIM step
-                            with torch.no_grad():
-                                # current prediction for x_0
-                                pred_x0 = (latents - beta_prod_t ** (0.5) * edit_noise_pred) / alpha_prod_t.sqrt()
-
-                                # direction pointing to x_t
-                                dir_xt = (1. - alpha_prod_t_prev - std_dev_t ** 2).sqrt() * edit_noise_pred
-
-                                # random noise
-                                noise = std_dev_t * torch.randn(latents.shape).to(device)
-                                
-                                # DDIM step, get prev latent z_{t-1}
-                                latents_prev = alpha_prod_t_prev.sqrt() * pred_x0 + dir_xt + noise
-
-                                # Inject noise (sample forward process) for recursive denoising
-                                recur_noise = torch.randn(latents.shape).to(device)
-                                latents = (alpha_prod_t / alpha_prod_t_prev).sqrt() * latents_prev + (1 - (alpha_prod_t / alpha_prod_t_prev)).sqrt() * recur_noise
-
-                                del pred_x0, dir_xt, noise  
-                                
-                        latents = latents_prev.to(prompt_embeds.dtype)
+                    latents = latents_prev.to(prompt_embeds.dtype)
                     
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or (
@@ -689,12 +692,16 @@ class StableDiffusionFreeGuidancePipeline(StableDiffusionAttendAndExcitePipeline
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
-
-        return [StableDiffusionPipelineOutput(
-            images=edit_image, nsfw_content_detected=has_nsfw_concept
-        ), StableDiffusionPipelineOutput(
-            images=ori_image, nsfw_content_detected=ori_has_nsfw_concept
-        )]
+        
+        mask = mask[0][0]
+        print(mask.shape)
+        mask_image = Image.fromarray(mask.detach().cpu().numpy().astype('uint8')*255)
+        return [edit_image, ori_image, mask_image]
+        # return [StableDiffusionPipelineOutput(
+        #     images=edit_image, nsfw_content_detected=has_nsfw_concept
+        # ), StableDiffusionPipelineOutput(
+        #     images=ori_image, nsfw_content_detected=ori_has_nsfw_concept
+        # )]
 
 
 # if __name__ == '__main__':

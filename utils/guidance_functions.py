@@ -13,6 +13,8 @@ import os
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 
+torch.autograd.set_detect_anomaly(True)
+
 # the calculation of character or attribute
 def threshold_attention(attn, s=10):
     norm_attn = s * (normalize(attn) - 0.5)
@@ -398,6 +400,64 @@ def fix_semantic(orig_mask, ori_feats, edit_mask, edit_feats, indices):
     
     return torch.stack(appearances).mean() * 0.1 
 
+def pca_fit_transform_torch(X, n_components=2):
+    X = X.to(torch.float32)
+    # torch.pca_lowrank 함수를 사용하여 U, S, V 행렬 얻기
+    U, S, V = torch.pca_lowrank(X, q=n_components)
+
+    # S를 대각행렬로 변환하고, n_components에 맞게 U를 조정
+    S_diag = torch.diag(S[:n_components])
+
+    # 데이터를 주성분 공간으로 변환
+    X_transformed = torch.matmul(U[:, :n_components], S_diag)
+
+    return X_transformed
+
+def fix_semantic_with_pca(orig_mask, ori_feats, edit_mask, edit_feats, indices, with_mask=True, visualize=True, iters=None):
+    n_components = 4
+    h, w = ori_feats.shape[2:4]
+    
+    if with_mask:
+        ori_feats = orig_mask * ori_feats 
+        edit_feats = edit_mask * edit_feats
+    
+    ori_feats_2d = ori_feats.reshape(ori_feats.shape[1], -1).permute(1, 0)
+    edit_feats_2d = edit_feats.reshape(edit_feats.shape[1], -1).permute(1, 0)
+
+    # pca = PCA(n_components=n_components)
+    feat1_n_feat2 = torch.cat((ori_feats_2d, edit_feats_2d), dim=0)
+    feat1_n_feat2 = pca_fit_transform_torch(feat1_n_feat2, n_components)
+    
+    feature1 = feat1_n_feat2[:ori_feats_2d.shape[0],:] # shape (3600,3)
+    feature2 = feat1_n_feat2[edit_feats_2d.shape[0]:,:]
+
+    loss = (feature1 - feature2).pow(2).mean()
+    # visualize with PCA
+    if iters is not None:
+        if visualize and iters > 45:    
+            for show_channel in range(n_components):
+                if show_channel==0:
+                    continue
+                feature1[:, show_channel] = (feature1[:, show_channel] - feature1[:, show_channel].min()) / (feature1[:, show_channel].max() - feature1[:, show_channel].min())
+                feature2[:, show_channel] = (feature2[:, show_channel] - feature2[:, show_channel].min()) / (feature2[:, show_channel].max() - feature2[:, show_channel].min())
+            
+            feature1_resized = feature1[:, :3].reshape(h, w, 3)
+            feature2_resized = feature2[:, :3].reshape(h, w, 3)
+    
+            # save feature1, feature2
+            fig, axes = plt.subplots(1, 2, figsize=(10,14))
+            axes[0].imshow(feature1_resized)
+            axes[0].axis('off')
+            axes[1].imshow(feature2_resized)
+            axes[1].axis('off')
+            axes[0].set_title('Feature 1', fontsize=14)
+            axes[1].set_title('Feature 2', fontsize=14)
+            
+            plt.tight_layout() 
+            fig.savefig('./pca.png', dpi=300)
+            
+    return loss * 0.1
+
 def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=0.5, fit_weight=1.0, feature_weight=0.5, ori_feats=None, edit_feats=None, iters=None):
     origs, edits = get_attns(attn_storage)
     
@@ -413,12 +473,13 @@ def match_semantic_feature(attn_storage, indices, position_weight=1, sem_weight=
     # position_term = position_weight * position_deltas(origs, edits, obj_idx)
     position_term = position_weight * fix_shapes_l2(origs, edits, obj_idx)
 
-    semantic_term, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, iters=iters)
+    semantic_term, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, iters=iters, with_mask=False, visualize=True)
     semantic_term = sem_weight * semantic_term 
     # semantic_term_wo_mask, flow_map =  match_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx, with_mask=False, visualize=False)
     # semantic_term_wo_mask = sem_weight * semantic_term_wo_mask
     
     # fit_feat_term = fit_weight * fit_semantic_with_flow(flow_map, orig_mask, ori_feats, edit_mask, edit_feats, obj_idx)
+    # feature_term = feature_weight * fix_semantic_with_pca(orig_mask, ori_feats, edit_mask, edit_feats, indices, iters=iters, with_mask=False, visualize=True)
     feature_term = feature_weight * fix_semantic(orig_mask, ori_feats, edit_mask, edit_feats, obj_idx)
     print(position_term, semantic_term, feature_term)  
       

@@ -17,8 +17,7 @@ def ddim_next_step(pipe, model_output, timestep, sample):
 @torch.no_grad()
 def get_ddim_latents(pipe, img_path, prompt, device):
     if img_path is None: return None
-    img = Image.open(img_path)
-    img = img.convert('RGB')
+    img = Image.open(img_path).resize((512,512)).convert('RGB')
     image = preprocess_image(img).to(device)
     latent = pipe.vae.encode(image.half()).latent_dist.sample() * 0.18215
     
